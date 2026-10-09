@@ -96,13 +96,59 @@ class DocumentChunker:
         FileNotFoundError
             If the file does not exist at the given path.
         """
-        # TODO: implement
-        # 1. Validate file exists
-        # 2. Route to _chunk_pdf or _chunk_markdown based on suffix
-        # 3. Apply metadata_overrides
-        # 4. Generate chunk_ids using VectorStoreManager.generate_chunk_id
-        # 5. Return list[DocumentChunk]
-        raise NotImplementedError
+        
+        file_path = Path(file_path)
+
+        if not file_path.exists():
+            raise FileNotFoundError(
+                f"File not found: {file_path}"
+            )
+
+        if file_path.suffix.lower() == ".md":
+            raw_chunks = self._chunk_markdown(
+                file_path,
+                chunk_size,
+                chunk_overlap,
+            )
+        else:
+            raise ValueError(
+                "Only Markdown (.md) files are supported "
+                "in this workshop."
+            )
+
+        metadata = self._infer_metadata(
+            file_path,
+            metadata_overrides,
+        )
+
+        document_chunks = []
+
+        for index, raw_chunk in enumerate(raw_chunks):
+            chunk_text = raw_chunk["text"]
+
+            chunk_id = VectorStoreManager.generate_chunk_id(
+                file_path.name,
+                chunk_text,
+            )
+
+    
+            chunk_metadata = metadata
+
+            document_chunks.append(
+                DocumentChunk(
+                    chunk_id=chunk_id,
+                    chunk_text=chunk_text,
+                    metadata=chunk_metadata,
+                )
+            )
+
+        logger.info(
+            f"Created {len(document_chunks)} chunks "
+            f"from {file_path.name}"
+        )
+
+        return document_chunks
+
 
     def chunk_files(
         self,
@@ -197,8 +243,46 @@ class DocumentChunker:
         list[dict]
             Raw dicts with 'text' and 'header' keys.
         """
-        # TODO: implement using langchain.text_splitter.MarkdownHeaderTextSplitter
-        raise NotImplementedError
+        
+        from langchain_text_splitters import (
+            MarkdownHeaderTextSplitter,
+            RecursiveCharacterTextSplitter,
+        )
+
+        text = file_path.read_text(encoding="utf-8")
+
+        markdown_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=[
+                ("#", "Header 1"),
+                ("##", "Header 2"),
+                ("###", "Header 3"),
+            ]
+        )
+
+        sections = markdown_splitter.split_text(text)
+
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+        chunks = []
+
+        for section in sections:
+            split_texts = text_splitter.split_text(
+                section.page_content
+            )
+
+            for chunk_text in split_texts:
+                chunks.append(
+                    {
+                        "text": chunk_text,
+                        "header": str(section.metadata),
+                    }
+                )
+
+        return chunks
+
 
     # -----------------------------------------------------------------------
     # Metadata Inference
@@ -231,6 +315,33 @@ class DocumentChunker:
         ChunkMetadata
             Populated metadata object.
         """
-        # TODO: implement filename parsing + override merging
-        # Bonus topics: SOM, BoltzmannMachine, GAN → set is_bonus=True
-        raise NotImplementedError
+        
+        filename = file_path.stem
+        parts = filename.split("_")
+
+        topic = parts[0].upper()
+        difficulty = "beginner"
+
+        if len(parts) > 1:
+            difficulty = parts[-1].lower()
+
+        is_bonus = topic in [
+            "SOM", "BOLTZMANNMACHINE", "GAN"
+        ]
+
+        
+        metadata = {
+            "source": file_path.name,
+            "topic": topic,
+            "difficulty": difficulty,
+            "type": "notes",
+            "is_bonus": is_bonus,
+        }
+
+        if overrides:
+            metadata.update(overrides)
+
+        
+
+        return ChunkMetadata(**metadata)
+

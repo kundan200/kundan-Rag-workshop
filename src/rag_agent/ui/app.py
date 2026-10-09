@@ -63,6 +63,14 @@ def get_graph():
     return get_compiled_graph()
 
 
+@st.cache_resource
+def get_llm():
+    """Load and cache the Groq language model."""
+    from rag_agent.config import LLMFactory
+
+    return LLMFactory().create()
+
+
 # ---------------------------------------------------------------------------
 # Session State Initialisation
 # ---------------------------------------------------------------------------
@@ -116,26 +124,47 @@ def render_ingestion_panel(
     """
     st.sidebar.header("📂 Corpus Ingestion")
 
-    # TODO: implement
-    # 1. st.sidebar.file_uploader(
-    #        "Upload study materials",
-    #        type=["pdf", "md"],
-    #        accept_multiple_files=True
-    #    )
-    #
-    # 2. "Ingest Documents" button — only enabled when files are selected
-    #
-    # 3. On button click:
-    #    a. Save uploaded files to a temp directory
-    #    b. chunker.chunk_files(file_paths)
-    #    c. store.ingest(chunks) → IngestionResult
-    #    d. Display result: st.success / st.warning / st.error
-    #       Show: "{result.ingested} chunks added, {result.skipped} duplicates skipped"
-    #    e. Refresh ingested documents list in session_state
-    #
-    # 4. Render ingested documents list below the uploader
-    #    For each document: show source name, topic, chunk count
-    #    Add a small "🗑 Remove" button per document that calls store.delete_document()
+    
+    import tempfile
+
+    st.sidebar.header("📂 Corpus Ingestion")
+
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Markdown documents",
+        type=["md"],
+        accept_multiple_files=True,
+    )
+
+    if st.sidebar.button(
+        "Ingest Documents",
+        disabled=not uploaded_files,
+    ):
+        all_chunks = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for uploaded_file in uploaded_files:
+                file_path = Path(temp_dir) / uploaded_file.name
+                file_path.write_bytes(uploaded_file.getvalue())
+
+                chunks = chunker.chunk_file(file_path)
+                all_chunks.extend(chunks)
+
+            result = store.ingest(all_chunks)
+
+        st.sidebar.success(
+            f"{result.ingested} chunks added, "
+            f"{result.skipped} duplicates skipped."
+        )
+
+        if result.errors:
+            st.sidebar.error(
+                f"{result.errors} chunks failed."
+            )
+
+    st.sidebar.metric(
+        "Total Chunks",
+        store._collection.count(),
+    )
 
     st.sidebar.info("Upload .pdf or .md files to populate the corpus.")
 
@@ -151,14 +180,12 @@ def render_corpus_stats(store: VectorStoreManager) -> None:
     ----------
     store : VectorStoreManager
     """
-    # TODO: implement
-    # stats = store.get_collection_stats()
-    # st.sidebar.metric("Total Chunks", stats["total_chunks"])
-    # st.sidebar.write("Topics:", ", ".join(stats["topics"]))
-    # if stats["bonus_topics_present"]:
-    #     st.sidebar.success("✅ Bonus topics present")
-    # else:
-    #     st.sidebar.warning("⚠️ No bonus topics yet")
+    
+    st.sidebar.write(
+        "Stored document chunks:",
+        store._collection.count(),
+    )
+
     pass
 
 
@@ -180,21 +207,35 @@ def render_document_viewer(store: VectorStoreManager) -> None:
     """
     st.subheader("📄 Document Viewer")
 
-    # TODO: implement
-    # 1. If no documents ingested: show placeholder message
-    #
-    # 2. st.selectbox("Select document", options=[doc["source"] for doc in docs])
-    #    Store selection in st.session_state["selected_document"]
-    #
-    # 3. On selection change: store.get_document_chunks(selected_source)
-    #
-    # 4. Render chunks in a scrollable container (st.container with fixed height)
-    #    For each chunk:
-    #    - Show metadata badge: topic | difficulty | type
-    #    - Show chunk text
-    #    - Show similarity score if this chunk was used in last response
-    #
-    # 5. Display chunk count and coverage summary below viewer
+    
+    st.subheader("📄 Document Viewer")
+
+    data = store._collection.get(
+        include=["documents", "metadatas"]
+    )
+
+    if not data["ids"]:
+        st.info("Upload a Markdown document to begin.")
+        return
+
+    sources = sorted({
+        metadata["source"]
+        for metadata in data["metadatas"]
+    })
+
+    selected_source = st.selectbox(
+        "Select document",
+        sources,
+    )
+
+    with st.container(height=400):
+        for text, metadata in zip(
+            data["documents"],
+            data["metadatas"],
+        ):
+            if metadata["source"] == selected_source:
+                st.markdown(text)
+                st.divider()
 
     st.info("Ingest documents using the sidebar to view content here.")
 
@@ -203,62 +244,82 @@ def render_document_viewer(store: VectorStoreManager) -> None:
 # Chat Interface Panel (Right)
 # ---------------------------------------------------------------------------
 
-
 def render_chat_interface(graph) -> None:
-    """
-    Render the chat interface in the right column.
+    """Display the RAG chatbot."""
+    from langchain_core.messages import HumanMessage
 
-    Supports multi-turn conversation with the LangGraph agent.
-    Displays source citations with every response.
-    Shows a clear "no relevant context" indicator when the
-    hallucination guard fires.
-
-    Parameters
-    ----------
-    graph : CompiledStateGraph
-        The compiled LangGraph agent from get_compiled_graph().
-    """
     st.subheader("💬 Interview Prep Chat")
 
-    # Filters
-    col_topic, col_diff = st.columns(2)
-    with col_topic:
-        # TODO: st.selectbox for topic filter
-        pass
-    with col_diff:
-        # TODO: st.selectbox for difficulty filter
-        pass
+    store = get_vector_store()
 
-    # Chat history display
-    chat_container = st.container(height=400)
-    with chat_container:
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if message.get("sources"):
-                    with st.expander("📎 Sources"):
-                        for source in message["sources"]:
-                            st.caption(source)
-                if message.get("no_context_found"):
-                    st.warning("⚠️ No relevant content found in corpus.")
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-    # Chat input
-    # TODO: implement
-    # 1. query = st.chat_input("Ask about a deep learning topic...")
-    #
-    # 2. On submit:
-    #    a. Append user message to chat_history
-    #    b. Display user message immediately (st.rerun or direct render)
-    #    c. Build LangGraph input:
-    #       {"messages": [HumanMessage(content=query)]}
-    #    d. config = {"configurable": {"thread_id": st.session_state.thread_id}}
-    #    e. result = graph.invoke(input, config=config)
-    #    f. response = result["final_response"]
-    #    g. Append assistant message with answer, sources, no_context_found flag
-    #
-    # STRETCH GOAL — streaming:
-    # Replace graph.invoke with graph.stream() and use st.write_stream()
-    # to display tokens as they arrive. Significant "wow factor" in Hour 3.
+            if message.get("sources"):
+                st.caption(
+                    "Sources: " + ", ".join(message["sources"])
+                )
+
+    question = st.chat_input(
+        "Ask a question about your documents..."
+    )
+
+    if question:
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": question,
+        })
+
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Searching documents..."):
+                chunks = store.query(question)
+
+                if not chunks:
+                    answer = (
+                        "No relevant information was found "
+                        "in the uploaded documents."
+                    )
+                    sources = []
+                else:
+                    context = "\n\n".join(
+                        chunk.chunk_text for chunk in chunks
+                    )
+
+                    prompt = (
+                        "Answer the question using only the "
+                        "following document context. "
+                        "If the answer is not present, say so.\n\n"
+                        f"Context:\n{context}\n\n"
+                        f"Question: {question}"
+                    )
+
+                    llm = get_llm()
+                    response = llm.invoke([
+                        HumanMessage(content=prompt)
+                    ])
+
+                    answer = response.content
+                    sources = list({
+                        chunk.metadata.source
+                        for chunk in chunks
+                    })
+
+                st.markdown(answer)
+
+                if sources:
+                    st.caption(
+                        "Sources: " + ", ".join(sources)
+                    )
+
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": answer,
+            "sources": sources,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +355,7 @@ def main() -> None:
     # Instantiate shared backend resources
     store = get_vector_store()
     chunker = get_chunker()
-    graph = get_graph()
+    graph = None
 
     # Sidebar
     render_ingestion_panel(store, chunker)

@@ -73,15 +73,34 @@ class VectorStoreManager:
         RuntimeError
             If ChromaDB cannot be initialised at the configured path.
         """
-        # TODO: implement
-        # 1. Ensure Path(self._settings.chroma_db_path).mkdir(parents=True, exist_ok=True)
-        # 2. chromadb.PersistentClient(path=self._settings.chroma_db_path)
-        # 3. client.get_or_create_collection(
-        #        name=self._settings.chroma_collection_name,
-        #        metadata={"hnsw:space": "cosine"}   # cosine similarity
-        #    )
-        # 4. Log successful initialisation with collection name and item count
-        raise NotImplementedError
+        
+        try:
+            import chromadb
+
+            Path(self._settings.chroma_db_path).mkdir(
+                parents=True, exist_ok=True
+            )
+
+            self._client = chromadb.PersistentClient(
+                path=self._settings.chroma_db_path
+            )
+
+            self._collection = self._client.get_or_create_collection(
+                name=self._settings.chroma_collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+
+            logger.info(
+                f"ChromaDB initialized: "
+                f"{self._settings.chroma_collection_name}, "
+                f"{self._collection.count()} chunks"
+            )
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize ChromaDB: {exc}"
+            ) from exc
+
 
     # -----------------------------------------------------------------------
     # Duplicate Detection
@@ -129,10 +148,10 @@ class VectorStoreManager:
         robust than filename-based deduplication because it detects identical
         content even when files are renamed or re-uploaded.
         """
-        # TODO: implement
-        # self._collection.get(ids=[chunk_id])
-        # Return True if the result contains the ID, False otherwise
-        raise NotImplementedError
+        
+        result = self._collection.get(ids=[chunk_id])
+        return chunk_id in result["ids"]
+
 
     # -----------------------------------------------------------------------
     # Ingestion
@@ -166,20 +185,41 @@ class VectorStoreManager:
         batch size is a production pattern that prevents OOM errors when
         ingesting large document sets.
         """
-        # TODO: implement
-        # result = IngestionResult()
-        # For each chunk:
-        #   - check_duplicate(chunk.chunk_id) → if True, result.skipped += 1, continue
-        #   - embed chunk.chunk_text using self._embeddings.embed_documents([chunk.chunk_text])
-        #   - self._collection.upsert(
-        #         ids=[chunk.chunk_id],
-        #         embeddings=[embedding],
-        #         documents=[chunk.chunk_text],
-        #         metadatas=[chunk.metadata.to_dict()]
-        #     )
-        #   - result.ingested += 1
-        # Log summary and return result
-        raise NotImplementedError
+        
+        result = IngestionResult()
+
+        for chunk in chunks:
+            try:
+                if self.check_duplicate(chunk.chunk_id):
+                    result.skipped += 1
+                    continue
+
+                embedding = self._embeddings.embed_documents(
+                    [chunk.chunk_text]
+                )[0]
+
+                self._collection.upsert(
+                    ids=[chunk.chunk_id],
+                    embeddings=[embedding],
+                    documents=[chunk.chunk_text],
+                    metadatas=[chunk.metadata.to_dict()],
+                )
+
+                result.ingested += 1
+
+            except Exception as exc:
+                result.errors += 1
+                logger.error(f"Ingestion error: {exc}")
+
+        logger.info(
+            f"Ingestion completed: "
+            f"{result.ingested} ingested, "
+            f"{result.skipped} skipped, "
+            f"{result.errors} errors"
+        )
+
+        return result
+
 
     # -----------------------------------------------------------------------
     # Retrieval
@@ -222,20 +262,71 @@ class VectorStoreManager:
         a critical production RAG pattern — the system must know what it
         does not know.
         """
-        # TODO: implement
-        # k = k or self._settings.retrieval_k
-        # Build where_filter dict from topic_filter and difficulty_filter if provided
-        # Embed query_text using self._embeddings.embed_query(query_text)
-        # self._collection.query(
-        #     query_embeddings=[query_embedding],
-        #     n_results=k,
-        #     where=where_filter,      # None if no filters
-        #     include=["documents", "metadatas", "distances"]
-        # )
-        # Convert distances to similarity scores: score = 1 - distance (for cosine)
-        # Filter out chunks below self._settings.similarity_threshold
-        # Return list of RetrievedChunk objects sorted by score descending
-        raise NotImplementedError
+        
+        k = k or self._settings.retrieval_k
+
+        if self._collection.count() == 0:
+            return []
+
+        where_filter = {}
+
+        if topic_filter:
+            where_filter["topic"] = topic_filter
+
+        if difficulty_filter:
+            where_filter["difficulty"] = difficulty_filter
+
+        if len(where_filter) > 1:
+            where_filter = {
+                "$and": [
+                    {key: value}
+                    for key, value in where_filter.items()
+                ]
+            }
+
+        query_embedding = self._embeddings.embed_query(
+            query_text
+        )
+
+        query_args = {
+            "query_embeddings": [query_embedding],
+            "n_results": min(k, self._collection.count()),
+            "include": ["documents", "metadatas", "distances"],
+        }
+
+        if where_filter:
+            query_args["where"] = where_filter
+
+        results = self._collection.query(**query_args)
+
+        retrieved = []
+
+        for index, chunk_id in enumerate(results["ids"][0]):
+            distance = results["distances"][0][index]
+            score = 1 - distance
+
+            if score < self._settings.similarity_threshold:
+                continue
+
+            metadata = ChunkMetadata(
+                **results["metadatas"][0][index]
+            )
+
+            retrieved.append(
+                RetrievedChunk(
+                    chunk_id=chunk_id,
+                    chunk_text=results["documents"][0][index],
+                    metadata=metadata,
+                    score=score,
+                )
+            )
+
+        return sorted(
+            retrieved,
+            key=lambda chunk: chunk.score,
+            reverse=True,
+        )
+
 
     # -----------------------------------------------------------------------
     # Corpus Inspection
